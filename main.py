@@ -1,85 +1,90 @@
 import json
 import os
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Dict, Any
 
 DB_FILE = "database.json"
 
-
+# Базовая БД (ID теперь всегда числа)
 DEFAULT_DB = {
     "players": {
-        "1": {"id": 1, "username": "Knight_Vlad", "gold": 250}
+        1: {"id": 1, "username": "Knight_Vlad", "gold": 250}
     },
     "items": {
-        "101": {"id": 101, "name": "Sword of Kings", "price": 100},
-        "102": {"id": 102, "name": "Health Potion", "price": 30}
+        101: {"id": 101, "name": "Sword of Kings", "price": 100},
+        102: {"id": 102, "name": "Health Potion", "price": 30}
     },
     "inventories": [
         {"player_id": 1, "item_id": 102, "quantity": 2}
     ]
 }
 
+app = FastAPI(title="Game Shop API")
 
-def load_db():
+
+# Схема входящего запроса. FastAPI автоматически проверит типы данных!
+class BuyRequest(BaseModel):
+    player_id: int
+    item_id: int
+
+
+def load_db() -> Dict[str, Any]:
     if not os.path.exists(DB_FILE):
-        with open(DB_FILE, 'w', encoding='utf-8') as f:
-            json.dump(DEFAULT_DB, f, indent=4)
+        save_db(DEFAULT_DB)
         return DEFAULT_DB
     
     with open(DB_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
+        data = json.load(f)
+        # Конвертируем строковые ключи JSON обратно в int
+        data["players"] = {int(k): v for k, v in data["players"].items()}
+        data["items"] = {int(k): v for k, v in data["items"].items()}
+        return data
 
 
-def save_db(data):
+def save_db(data: Dict[str, Any]) -> None:
     with open(DB_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 
-def process_buy_item_request(json_request_body: str) -> str:
-    db = load_db()  
+@app.post("/api/v1/buy")
+async def buy_item(request: BuyRequest):
+    db = load_db()
     
-    try:
-        request_data = json.loads(json_request_body)
-        player_id = str(request_data.get("player_id"))
-        item_id = str(request_data.get("item_id"))
-    except Exception:
-        return json.dumps({"status": "error", "detail": "Invalid JSON"}, indent=4)
+    player = db["players"].get(request.player_id)
+    item = db["items"].get(request.item_id)
 
-    player = db["players"].get(player_id)
-    item = db["items"].get(item_id)
-
+    # Вместо возврата словарей с ошибками используем правильные HTTP-исключения
     if not player or not item:
-        return json.dumps({"status": "error", "detail": "Player or item not found"}, indent=4)
+        raise HTTPException(status_code=404, detail="Player or item not found")
 
     if player["gold"] < item["price"]:
-        return json.dumps({"status": "error", "detail": "Not enough gold for purchase!"}, indent=4)
+        raise HTTPException(status_code=400, detail="Not enough gold for purchase!")
 
+    # Списание золота
     player["gold"] -= item["price"]
     
-    
-    updated = False
+    # Обновление инвентаря через встроенный цикл else
     for inv in db["inventories"]:
-        if inv["player_id"] == int(player_id) and inv["item_id"] == int(item_id):
+        if inv["player_id"] == request.player_id and inv["item_id"] == request.item_id:
             inv["quantity"] += 1
-            updated = True
             break
-            
-    if not updated:
-        db["inventories"].append({"player_id": int(player_id), "item_id": int(item_id), "quantity": 1})
+    else:
+        db["inventories"].append({
+            "player_id": request.player_id, 
+            "item_id": request.item_id, 
+            "quantity": 1
+        })
 
     save_db(db)
 
-    return json.dumps({
+    return {
         "status": "success",
         "message": f"Successfully bought {item['name']}",
         "remaining_gold": player["gold"]
-    }, indent=4)
-
+    }
 
 if __name__ == '__main__':
-    print("=== СИМУЛЯЦИЯ С ХРАНЕНИЕМ В ФАЙЛЕ ===")
-    
-    mock_request = '{"player_id": 1, "item_id": 101}'
-    response = process_buy_item_request(mock_request)
-    print(response)
-    
-    db_after = load_db()
-    print(f"\nТекущее золото в файле: {db_after['players']['1']['gold']}")
+    import uvicorn
+    # Запуск локального сервера разработки
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
